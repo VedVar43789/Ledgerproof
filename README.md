@@ -1,6 +1,6 @@
-# Ledgerproof
+# Ledgerproof: Financial Research Agent
 
-Financial research agent where every number is verified against the filing it came from.
+ Where every number is verified against the filing it came from.
 
 ---
 
