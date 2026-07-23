@@ -24,7 +24,7 @@ This is the single biggest reason language models are not trusted for financial 
 
 **It is not:** a chatbot for finance, a stock picker, or a multi agent framework demonstration.
 
-The deliverable that matters is not the architecture. It is a number: the citation hallucination rate before verification was added, and the rate after. Everything in this plan exists to produce that number honestly.
+The deliverable that matters is not the architecture. It is a measured hallucination rate before and after verification, across two models with different baseline error rates. Everything in this plan exists to produce those numbers honestly.
 
 ---
 
@@ -49,10 +49,27 @@ Deliberately small.
 | Piece | Choice | Why |
 | --- | --- | --- |
 | Language | Python 3.11+ | Nothing exotic needed |
-| Model | Claude or GPT via SDK | Direct API calls, no framework until v4 |
+| Model (development) | Gemini 3 Flash via Google AI Studio free tier | No cost; agent loop mechanics are model agnostic |
+| Model (evaluation) | Gemini 3 Flash and a Sonnet class model | Two model comparison via provider abstraction |
+| Provider layer | `agent/llm.py` | Single interface; swapping providers is a config change |
 | Data source | SEC EDGAR `companyfacts` API | Free, no key, returns structured JSON |
 | Storage | JSON files, then SQLite at v3 | Do not overbuild this |
 | Framework | None until v4, then LangGraph | The point is to build it before abstracting it |
+
+**Primary development model:** Gemini 3 Flash on the Google AI Studio free tier. No cost during development, and the loop mechanics being learned transfer to any provider.
+
+**Free tier constraints that shape the code:**
+
+| Constraint | Limit |
+| --- | --- |
+| Requests per minute | ~10 |
+| Tokens per minute | 250,000 |
+| Requests per day | 1,500 |
+| Available models | Flash and Flash-Lite only (Pro models moved behind billing in April 2026) |
+
+Quota is per Google Cloud project, not per API key. It resets at midnight Pacific, not on a rolling window. Free tier prompts may be used for training, which is acceptable here because all data sent is public SEC filing data.
+
+**Provider abstraction:** `agent/llm.py` exposes one function that takes messages and tool definitions and returns either a tool call request or a final answer. All provider specific code lives only in this file. Swapping between Gemini, Anthropic, and OpenAI is a config change. This exists to make the two model evaluation comparison cheap.
 
 **The key technical fact that makes this project feasible:**
 
@@ -72,7 +89,7 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 
 ---
 
-### v0 — The Raw Loop
+### v0: The Raw Loop
 
 **Goal:** watch an agent make a decision you did not script.
 
@@ -80,21 +97,27 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 
 **Components:**
 
-- `get_company_facts(ticker)` — resolves ticker to CIK, fetches the JSON, returns a trimmed version containing only the concepts likely to be relevant. The raw file can be several megabytes, so filter before it reaches the model.
-- `calculate(expression)` — evaluates a arithmetic string and returns the result. The model must never do arithmetic itself.
-- `done(answer)` — the model calls this to end the run.
-- The loop — roughly forty lines. Call model, read tool request, execute, append result, repeat. Cap at fifteen iterations.
-- Trajectory printing — print every tool call and result to the terminal as it happens.
+- `agent/llm.py` - provider abstraction. One function: messages and tool definitions in, tool call or final answer out. All Gemini, Anthropic, and OpenAI specific code lives here only.
+- `get_company_facts(ticker)` - resolves ticker to CIK, fetches the JSON, returns a trimmed version containing only the concepts likely to be relevant. The raw file can be several megabytes, so filter before it reaches the model. Responses are cached to disk so repeated development runs against the same company hit the network once.
+- `calculate(expression)` - evaluates an arithmetic string and returns the result. The model must never do arithmetic itself.
+- `done(answer)` - the model calls this to end the run.
+- The loop - roughly forty lines. Call `llm.call`, read tool request, execute, append result, repeat. Cap at fifteen iterations.
+- Trajectory printing - print every tool call and result to the terminal as it happens.
+- Client side rate limiting - the binding constraint is tokens per minute, not requests per day. The companyfacts payload is resent on every iteration. An eight step run can move roughly 100,000 tokens in under a minute, so two consecutive runs approach the 250,000 token per minute ceiling.
+- Exponential backoff with jitter on HTTP 429.
+- EDGAR disk cache - repeated runs against the same ticker read from cache instead of the network.
+
+Tool and API failure handling is agent engineering practice, not a workaround.
 
 **Definition of done:** you type a question about one company, and you watch it fetch, then compute a different number of times depending on the question, then answer.
 
-**What you learn:** what an agent actually is. Tool schemas, the message accumulation pattern, why iteration caps exist, what a malformed tool call looks like.
+**What you learn:** what an agent actually is. Tool schemas, the message accumulation pattern, why iteration caps exist, what a malformed tool call looks like, and why rate limiting belongs in v0 rather than later.
 
 **What is deliberately missing:** verification, evaluation, memory, multiple companies, any framework.
 
 ---
 
-### v1 — Citations and Verification
+### v1: Citations and Verification
 
 **Goal:** stop the model being able to invent a number.
 
@@ -114,7 +137,7 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 
 ---
 
-### v2 — The Evaluation Set
+### v2: The Evaluation Set
 
 **Goal:** turn "it seems to work" into a number.
 
@@ -127,10 +150,11 @@ Five versions. Each one runs end to end and does something useful. If you stop a
   - *Numerical accuracy:* is the value correct, within a tolerance you define.
   - *Citation validity:* does the cited concept and period actually contain that value. This is checkable by code.
   - *Appropriate refusal:* on unanswerable questions, did it say so rather than guess.
-- **The runner.** Executes all questions against a given version, writes results to a file, prints a summary table.
-- **The comparison.** Run the suite against v0 and against v1. The difference is your headline metric.
+- **The runner.** Executes all questions against a given version and model, writes results to a file, prints a summary table.
+- **Two model comparison.** Run the full suite against Gemini 3 Flash and a Sonnet class model. Budget for the paid Sonnet runs is roughly $10 to $20. Each model is tested on v0 (no verification) and v1 (with verification).
+- **The headline result.** A two dimensional table: hallucination rate per model, before and after programmatic verification. A single before/after number only shows verification helps on one model. The table shows verification reduces hallucination across models with different baseline error rates. That demonstrates the verification layer works independently of model quality, which is the central claim.
 
-**Definition of done:** you can state a sentence of this form with real numbers behind it: "Citation hallucination rate was X percent before programmatic verification and Y percent after."
+**Definition of done:** you can state real numbers behind a two dimensional table: hallucination rate for each model, before and after verification.
 
 **What you learn:** how agents are actually evaluated in industry. Why trajectory evaluation differs from final answer evaluation. Why LLM as judge is unreliable for numerical claims and why programmatic checking is better wherever it is possible.
 
@@ -138,7 +162,7 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 
 ---
 
-### v3 — Multiple Companies and Memory
+### v3: Multiple Companies and Memory
 
 **Goal:** longer trajectories, and the problems that only appear when trajectories get long.
 
@@ -158,7 +182,7 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 
 ---
 
-### v4 — The LangGraph Rebuild
+### v4: The LangGraph Rebuild
 
 **Goal:** turn LangGraph from a tool you used into a tool you can critique.
 
@@ -178,7 +202,7 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 
 ---
 
-### v5 — Voice, Optional
+### v5: Voice, Optional
 
 **Goal:** a demo hook. One evening, after everything else.
 
@@ -196,15 +220,16 @@ Five versions. Each one runs end to end and does something useful. If you stop a
 ## 6. Suggested Repository Layout
 
 ```
-financial-research-agent/
+Ledgerproof/
   agent/
     loop.py           # the agent loop
+    llm.py            # provider abstraction (Gemini, Anthropic, OpenAI)
     tools.py          # tool definitions and dispatch
     verify.py         # the verification pass
     memory.py         # notes and compaction, v3
     prompts.py
   data/
-    edgar.py          # companyfacts fetching, CIK resolution
+    edgar.py          # companyfacts fetching, CIK resolution, disk cache
   eval/
     questions.json    # ground truth set
     runner.py
@@ -233,7 +258,7 @@ financial-research-agent/
 
 **Resume bullet shape:**
 
-> Built a verified financial research agent over SEC XBRL data with programmatic citation checking, reducing citation hallucination rate from X percent to Y percent across a hand verified 25 question evaluation suite.
+> Built a verified financial research agent over SEC XBRL data with programmatic citation checking, reducing citation hallucination rate from X% to Y% on Gemini 3 Flash and from A% to B% on a Sonnet class model, measured across a hand verified 25 question evaluation suite.
 
 **LinkedIn post shape:** lead with the number, not the architecture. Everyone posts architecture diagrams. Almost nobody posts a measured before and after on hallucination rate, and that is the thing practitioners stop scrolling for.
 
