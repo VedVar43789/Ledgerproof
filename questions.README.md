@@ -44,6 +44,106 @@ Unanswerable question — no `ground_truth` block at all:
 }
 ```
 
+## Every key, what goes in it
+
+### Top-level keys (present on every question)
+
+**`id`** — A stable unique label, `q01` through `q25`. Zero-padded so they sort
+correctly. Never reuse or renumber an id once you have results tied to it, because
+your results files reference questions by id. If you add questions later, keep
+going: q26, q27.
+
+**`type`** — One of four values. This is not decoration; the runner groups scores
+by type so you can see, for example, that accuracy is high on lookups but low on
+traps. Choose by what the question tests:
+- `single_lookup` — one figure read directly from a statement, no math. "What was
+  revenue in Q3."
+- `calculation` — the answer requires arithmetic the agent must route through the
+  calculator. Margins, growth rates, differences.
+- `unanswerable` — the answer cannot come from XBRL companyfacts. The correct
+  behaviour is refusal. Never has a ground_truth block.
+- `trap` — answerable, but engineered so a naive agent gets a plausible wrong
+  answer. Period-type confusion, fiscal-label confusion, attribution ambiguity.
+
+**`question`** — The exact natural-language string sent to the agent. Write it the
+way a person would actually ask, and make the period unambiguous by naming the
+calendar quarter-end date, for example "the quarter ended April 30, 2025", not
+"Q1", because fiscal Q1 means different months at different companies. This is the
+only field the agent sees. Everything else is for scoring.
+
+**`ticker`** — Uppercase stock symbol, `DDOG`, `SNOW`, `MSFT`. The runner uses it
+to know which company facts to expect and for per-company score breakdowns. It
+must match the ticker your `edgar.resolve_cik` can look up.
+
+**`answerable`** — `true` or `false`. `true` means a correct figure exists in XBRL
+and you must supply ground truth. `false` means the correct agent behaviour is to
+decline, and you supply no ground_truth block. This flag is what the runner
+branches on to decide which scorer to apply.
+
+**`verify_url`** — The EDGAR page where you (the human) go to find and confirm the
+answer. Not used by the runner or the agent. It exists so that three weeks from now
+you can re-check a value without rediscovering where it came from. Leave the
+provided URLs as they are.
+
+**`notes`** — Free text, for you. Two jobs: reading instructions before you fill
+the value ("three-months column, not six-months"), and an audit trail after
+("used total revenue 921.0M and total cost 178.4M; margin 80.6%"). When the agent
+later disagrees with your ground truth, this note is how you tell whether the agent
+is wrong or your value is. Write down the raw inputs to any calculation here, not
+just the final answer.
+
+### Inside `ground_truth` (answerable questions only)
+
+**`value`** — The correct answer, as a plain number in base units. Dollars, not
+millions: write `690016000`, not `690.0` or `690016`. For percentages, write the
+percentage number: a 80.03% margin is `80.03`, not `0.8003`. This is the single
+most important field and the one you must read from the filing yourself. It starts
+as `null`.
+
+**`_UNVERIFIED_recalled_value`** — Only on q01 and q02. A model's guess at the
+value, present so you can see a completed record's shape. Treat it as wrong until
+you confirm it. Once you have read the real number into `value`, delete this key.
+No other question should have it.
+
+**`tolerance_pct`** — How close the agent's answer must be to count as correct,
+as a fraction. `0.005` means within 0.5 percent, which absorbs rounding when the
+filing reports millions and the agent works in whole dollars. Use a wider value
+for multi-step calculations where rounding compounds: growth-rate questions use
+`0.02`. One exception: on q12 the answer is measured in percentage POINTS, so the
+tolerance is an absolute point value, not a fraction. Either special-case q12 in
+the runner, or add a `tolerance_abs` key and have the runner prefer it when present.
+The second is cleaner if you have more point-difference questions later.
+
+**`concept`** — What the value should be cited as, so citation validity can be
+checked. Two forms:
+- For a directly reported figure, the exact XBRL tag, for example
+  `RevenueFromContractWithCustomerExcludingAssessedTax` or `NetIncomeLoss`. Get the
+  exact tag by looking at the companyfacts JSON, since it varies by company. If you
+  do not yet know it, leave `null` and fill it when you read the filing.
+- For a calculation, a `derived:` string naming the formula, for example
+  `derived: (Revenue - CostOfRevenue) / Revenue * 100`. This is documentation of
+  how the answer is built; the runner does not parse it, it is for you and for
+  anyone reading the eval set.
+
+**`period_start`** and **`period_end`** — The exact dates the figure covers, ISO
+format `YYYY-MM-DD`. For a quarter these span roughly three months; for a full year,
+twelve. These are already filled based on the calendar quarter in each question, but
+CONFIRM them against the filing, especially for Nvidia (q05, q16, q22), whose
+quarters end on odd dates like April 27 rather than a clean month-end. A wrong
+period here means citation validity fails even when the value is right.
+
+**`accession`** — The SEC accession number of the specific filing you read the
+value from, format like `0001561550-25-000313`. Fill it when you read the value. It
+matters most on restated figures, where the same fiscal quarter appears in two
+filings with different numbers, and this records which one you treated as truth.
+Starts as `null`.
+
+### Extra key on unanswerable questions
+
+**`unanswerable_reason`** — Why it cannot be answered from XBRL. Drives whether it
+could become answerable in a later version. Values are listed in their own section
+below. Only appears when `answerable` is `false`.
+
 ## How the runner should score
 
 - **Numerical accuracy** (answerable only): agent value within `tolerance_pct` of `value`.
